@@ -55,6 +55,15 @@
  * Note that even when dict_can_resize is set to 0, not all resizes are
  * prevented: a hash table is still allowed to grow if the ratio between
  * the number of elements and the buckets > dict_force_resize_ratio. */
+
+
+/*
+  redis 用了 dictEnableResize()/dictDisableResize() 重新调整hashtable 的大小
+  redis 采用写时拷贝的算法， 不需要挪动太多的内存,
+  只要调整数量大于一定比例才可能有效
+
+
+*/
 static int dict_can_resize = 1;
 static unsigned int dict_force_resize_ratio = 5;
 
@@ -67,7 +76,10 @@ static int _dictInit(dict *ht, dictType *type, void *privDataPtr);
 
 /* -------------------------- hash functions -------------------------------- */
 
-/* Thomas Wang's 32 bit Mix Function */
+/* Thomas Wang's 32 bit Mix Function
+hash 算法直接输入key , 获得索引值，据说冲突很低
+
+*/
 unsigned int dictIntHashFunction(unsigned int key)
 {
     key += ~(key << 15);
@@ -79,12 +91,21 @@ unsigned int dictIntHashFunction(unsigned int key)
     return key;
 }
 
+
+/*
+ hash 方法种子，跟产生随机数的种子作用
+ 是一样的
+*/
 static uint32_t dict_hash_function_seed = 5381;
 
+
+/* reset  hash seed*/
 void dictSetHashFunctionSeed(uint32_t seed) {
     dict_hash_function_seed = seed;
 }
 
+
+/*get hash seed*/
 uint32_t dictGetHashFunctionSeed(void) {
     return dict_hash_function_seed;
 }
@@ -100,6 +121,13 @@ uint32_t dictGetHashFunctionSeed(void) {
  * 2. It will not produce the same results on little-endian and big-endian
  *    machines.
  */
+
+/*
+ 输入key, 目标长度, 该方法计算索引值，
+ 此方法表明，不会因为高低 bit 存储的不同
+ 而产生相同的结果
+
+*/
 unsigned int dictGenHashFunction(const void *key, int len) {
     /* 'm' and 'r' are mixing constants generated offline.
      They're not really 'magic', they just happen to work well.  */
@@ -143,7 +171,9 @@ unsigned int dictGenHashFunction(const void *key, int len) {
     return (unsigned int)h;
 }
 
-/* And a case insensitive hash function (based on djb hash) */
+/* And a case insensitive hash function (based on djb hash) 
+一种比较简单的hash algorithm  DJB hash
+*/
 unsigned int dictGenCaseHashFunction(const unsigned char *buf, int len) {
     unsigned int hash = (unsigned int)dict_hash_function_seed;
 
@@ -156,6 +186,10 @@ unsigned int dictGenCaseHashFunction(const unsigned char *buf, int len) {
 
 /* Reset a hash table already initialized with ht_init().
  * NOTE: This function should only be called by ht_destroy(). */
+
+/*
+   重置hash table, 只有destroy be called
+*/
 static void _dictReset(dictht *ht)
 {
     ht->table = NULL;
@@ -164,19 +198,20 @@ static void _dictReset(dictht *ht)
     ht->used = 0;
 }
 
-/* Create a new hash table */
-dict *dictCreate(dictType *type,
-        void *privDataPtr)
+/* Create a new hash table 
+创建dict 操作类
+*/
+dict *dictCreate(dictType *type,  void *privDataPtr)
 {
     dict *d = zmalloc(sizeof(*d));
+/*malloc 之后调用初始化方法*/
 
     _dictInit(d,type,privDataPtr);
     return d;
 }
 
 /* Initialize the hash table */
-int _dictInit(dict *d, dictType *type,
-        void *privDataPtr)
+int _dictInit(dict *d, dictType *type, void *privDataPtr)
 {
     _dictReset(&d->ht[0]);
     _dictReset(&d->ht[1]);
@@ -188,33 +223,46 @@ int _dictInit(dict *d, dictType *type,
 }
 
 /* Resize the table to the minimal size that contains all the elements,
- * but with the invariant of a USED/BUCKETS ratio near to <= 1 */
+ * but with the invariant of a USED/BUCKETS ratio near to <= 1 
+调整hash table, 用最少的值容纳所欲偶的
+dict 集合
+ */
 int dictResize(dict *d)
 {
     int minimal;
-
-    if (!dict_can_resize || dictIsRehashing(d)) return DICT_ERR;
+                                   /*已经调整过*/
+    if (!dict_can_resize || dictIsRehashing(d)) 
+		return DICT_ERR;
+	
     minimal = d->ht[0].used;
     if (minimal < DICT_HT_INITIAL_SIZE)
-        minimal = DICT_HT_INITIAL_SIZE;
+        minimal = DICT_HT_INITIAL_SIZE;   /*mininal 扩展为最大的4 个*/
     return dictExpand(d, minimal);
 }
 
-/* Expand or create the hash table */
+/* Expand or create the hash table 
+ hash table 扩增方法
+*/
 int dictExpand(dict *d, unsigned long size)
 {
     dictht n; /* the new hash table */
+	/*获取调整值，以2 的指数幂向上取*/
     unsigned long realsize = _dictNextPower(size);
 
-    /* the size is invalid if it is smaller than the number of
-     * elements already inside the hash table */
-    if (dictIsRehashing(d) || d->ht[0].used > size)
+    /* the size is invalid if it is smaller than the number of   elements already inside the hash table */
+     /*再次判断数量是否合格*/
+	if (dictIsRehashing(d) || d->ht[0].used > size)
         return DICT_ERR;
 
-    /* Rehashing to the same table size is not useful. */
-    if (realsize == d->ht[0].size) return DICT_ERR;
+    /* Rehashing to the same table size is not useful. 
+         相同大小也不能用
+	*/
+    if (realsize == d->ht[0].size)
+		return DICT_ERR;
 
-    /* Allocate the new hash table and initialize all pointers to NULL */
+    /* Allocate the new hash table and initialize all pointers to NULL
+      初始化hash table 
+    */
     n.size = realsize;
     n.sizemask = realsize-1;
     n.table = zcalloc(realsize*sizeof(dictEntry*));
@@ -222,7 +270,10 @@ int dictExpand(dict *d, unsigned long size)
 
     /* Is this the first initialization? If so it's not really a rehashing
      * we just set the first hash table so that it can accept keys. */
-    if (d->ht[0].table == NULL) {
+   /*看是否是第一次初始化,如果是 , 付给ht[0]
+      否则付给ht[1]
+	*/
+	if (d->ht[0].table == NULL) {
         d->ht[0] = n;
         return DICT_OK;
     }
@@ -242,6 +293,12 @@ int dictExpand(dict *d, unsigned long size)
  * guaranteed that this function will rehash even a single bucket, since it
  * will visit at max N*10 empty buckets in total, otherwise the amount of
  * work it does would be unbound and the function may block for a long time. */
+
+/*
+   hash 重定位，主要从旧表映射到新表
+
+   如果返回1说明旧的表中还存在key迁移到新表中，0代表没有
+*/
 int dictRehash(dict *d, int n) {
     int empty_visits = n*10; /* Max number of empty buckets to visit. */
     if (!dictIsRehashing(d)) return 0;
@@ -262,9 +319,9 @@ int dictRehash(dict *d, int n) {
             unsigned int h;
 
             nextde = de->next;
-            /* Get the index in the new hash table */
-            h = dictHashKey(d, de->key) & d->ht[1].sizemask;
-            de->next = d->ht[1].table[h];
+            /* Get the index in the new hash table  \\\         hash*/
+            h = dictHashKey(d, de->key) & d->ht[1].sizemask;   
+            de->next = d->ht[1].table[h];   // 以de 为根节点，然后链接起来
             d->ht[1].table[h] = de;
             d->ht[0].used--;
             d->ht[1].used++;
@@ -287,21 +344,28 @@ int dictRehash(dict *d, int n) {
     return 1;
 }
 
+
+/*获取current  ms */
 long long timeInMilliseconds(void) {
     struct timeval tv;
-
     gettimeofday(&tv,NULL);
     return (((long long)tv.tv_sec)*1000)+(tv.tv_usec/1000);
 }
 
 /* Rehash for an amount of time between ms milliseconds and ms+1 milliseconds */
+
+/*在给定时间内，循环执行hash 重定位
+*/
 int dictRehashMilliseconds(dict *d, int ms) {
     long long start = timeInMilliseconds();
     int rehashes = 0;
 
     while(dictRehash(d,100)) {
+	/*重定位次数累加*/
         rehashes += 100;
-        if (timeInMilliseconds()-start > ms) break;
+	/*超出给定时间范围，则终止*/
+        if (timeInMilliseconds()-start > ms) 
+			break;
     }
     return rehashes;
 }
@@ -519,10 +583,16 @@ void *dictFetchValue(dict *d, const void *key) {
 
 /* A fingerprint is a 64 bit number that represents the state of the dictionary
  * at a given time, it's just a few dict properties xored together.
+    仅仅是字典的属性 xor
+    
  * When an unsafe iterator is initialized, we get the dict fingerprint, and check
  * the fingerprint again when the iterator is released.
+当不安全的iterator 初始化， 我们得到一个指纹，然后再释放的时候
+ 
  * If the two fingerprints are different it means that the user of the iterator
- * performed forbidden operations against the dictionary while iterating. */
+ * performed forbidden operations against the dictionary while iterating. 
+当两个指纹不同的时候意味着对迭代器进行禁止操作在迭代的时候
+ */
 long long dictFingerprint(dict *d) {
     long long integers[6], hash = 0;
     int j;
@@ -530,6 +600,7 @@ long long dictFingerprint(dict *d) {
     integers[0] = (long) d->ht[0].table;
     integers[1] = d->ht[0].size;
     integers[2] = d->ht[0].used;
+	
     integers[3] = (long) d->ht[1].table;
     integers[4] = d->ht[1].size;
     integers[5] = d->ht[1].used;
@@ -555,6 +626,8 @@ long long dictFingerprint(dict *d) {
     return hash;
 }
 
+
+/*创建一个iterator, safe = 0*/
 dictIterator *dictGetIterator(dict *d)
 {
     dictIterator *iter = zmalloc(sizeof(*iter));
@@ -568,9 +641,9 @@ dictIterator *dictGetIterator(dict *d)
     return iter;
 }
 
+/*创建一个iterator , safe = 1*/
 dictIterator *dictGetSafeIterator(dict *d) {
     dictIterator *i = dictGetIterator(d);
-
     i->safe = 1;
     return i;
 }
@@ -610,6 +683,8 @@ dictEntry *dictNext(dictIterator *iter)
     return NULL;
 }
 
+
+/*释放iterator */
 void dictReleaseIterator(dictIterator *iter)
 {
     if (!(iter->index == -1 && iter->table == 0)) {
